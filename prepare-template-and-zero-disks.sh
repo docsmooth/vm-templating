@@ -2,6 +2,10 @@
 # From https://lonesysadmin.net/2013/03/26/preparing-linux-template-vms/
 # Ubuntu from https://jimangel.io/post/create-a-vm-template-ubuntu-18.04/
 
+# Version 1.0: Red Hat / CentOS only.
+# Version 1.1: Read in data from Jim Angel per link above
+# Version 1.2: bugfixes on Ubuntu
+
 release=`awk -F= '/DISTRIB_ID=/ { print $NF }' /etc/lsb-release`
 if [ -z "$release" ]; then
 	release=`awk '/(Cent|Red)/ { print $1 }' /etc/redhat-release`
@@ -11,6 +15,10 @@ if [ "x$release" = "xUbuntu" ]; then
 	service rsyslog stop
 	service auditd stop
 	apt clean
+    # Ubuntu's dpkg-reconfigure will rewrite the SSH server host keys
+    # on reboot, so we do that in rc.local.
+    # However, on RHEL-based systems, simply having a file named "/.unconfigured"
+    # performs the same task
 	cat << 'EOL' | sudo tee /etc/rc.local
 #!/bin/sh -e
 #
@@ -41,6 +49,9 @@ else
 	yum clean all
 fi
 /usr/sbin/logrotate –f /etc/logrotate.conf
+# Try to remove date-stamped logfiles rotated by logrotate
+# This will throw an error about unattended-upgrades being a directory,
+# Which is why the "-r" flag is NOT added here.
 /bin/rm -f /var/log/*-???????? /var/log/*.gz
 /bin/rm -f /var/log/dmesg.old
 /bin/rm -rf /var/log/anaconda
@@ -49,9 +60,7 @@ fi
 /bin/cat /dev/null > /var/log/lastlog
 /bin/cat /dev/null > /var/log/grubby
 /bin/rm -f /etc/udev/rules.d/70*
-if [ -d /etc/sysconfig ]; then
-	/bin/sed -i '/^(HWADDR|UUID)=/d' /etc/sysconfig/network-scripts/ifcfg-eth0
-else
+if [ "x$release" = "xUbuntu" ]; then
 	sed -i 's/preserve_hostname: false/preserve_hostname: true/g' /etc/cloud/cloud.cfg
 	truncate -s0 /etc/hostname
 	hostnamectl set-hostname localhost
@@ -59,6 +68,8 @@ else
 
 	# cleans out all of the cloud-init cache / logs - this is mainly cleaning out networking info
 	sudo cloud-init clean --logs
+else
+	/bin/sed -i '/^(HWADDR|UUID)=/d' /etc/sysconfig/network-scripts/ifcfg-eth0
 fi
 /bin/rm -rf /tmp/*
 /bin/rm -rf /var/tmp/*
@@ -70,18 +81,25 @@ export HISTFILE
 /bin/rm -f ~root/anaconda-ks.cfg
 touch /.unconfigured
 
-# Determine the version of RHEL
+# some versions of RHEL/CentOS don't have VG commands in /sbin
+# so set a PREFIX for the next block to work right.
+# After determinig these values, fill up the disk with zeros
+# and then delete that file. In this way we can clone
+# it as an expanding disk, but the clones and template
+# will start as small as possible.
+
 COND=`grep -i Taroon /etc/redhat-release`
 if [ "$COND" = "" ]; then
-	export PREFIX="/usr/sbin"
-elif [ ! -f "/etc/redhat-release" ]; then
 	export PREFIX="/usr/sbin"
 else
 	export PREFIX="/sbin"
 fi
 
-FileSystem=`awk -F" " '/(ext|xfs)/ { print $2 }' /etc/mnttab`
-
+if [ "x$release" = "xUbuntu" ]; then
+    FileSystem=`mount | awk -F" " '/(ext|xfs)/ { print $3 }'`
+else
+    FileSystem=`awk -F" " '/(ext|xfs)/ { print $2 }' /etc/mnttab`
+fi 
 for i in $FileSystem
 do
 	echo $i
@@ -95,6 +113,7 @@ do
 	rm -f $i/zf
 done
 
+# File Systems aren't the only things that can have free space that need to be 0'd out
 VolumeGroup=`$PREFIX/vgdisplay | awk -F" " '/Name/ { print $3 }'`
 
 for j in $VolumeGroup
